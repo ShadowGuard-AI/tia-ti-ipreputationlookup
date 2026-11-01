@@ -10,6 +10,9 @@ from bs4 import BeautifulSoup
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # API Keys (Store securely, consider environment variables)
+# Both keys are read once, at import. A process that sets the
+# environment after importing this module, as test harnesses do,
+# is checked against the empty values captured here.
 ABUSEIPDB_API_KEY = os.environ.get("ABUSEIPDB_API_KEY")
 VIRUSTOTAL_API_KEY = os.environ.get("VIRUSTOTAL_API_KEY")
 
@@ -47,6 +50,11 @@ def check_abuseipdb(ip_address, timeout=30):
         logging.error(f"Error querying AbuseIPDB: {e}")
         return "error", None
 
+    # Status handling is deliberately coarse in both keyed services:
+    # only 404 earns its own outcome. A 401 for a bad key and a 429 for
+    # rate limiting both land in the same error bucket as a dead
+    # service, so the printed report cannot tell an operator their
+    # key is wrong.
     if response.status_code == 404:
         logging.info(f"AbuseIPDB has no record of {ip_address} (HTTP 404).")
         return "unknown", None
@@ -141,6 +149,10 @@ def scrape_ipvoid(ip_address, timeout=30):
                     results[name] = status
         if not results:
             logging.info(f"IPVoid returned no results table for {ip_address}.")
+            # IPVoid is the odd one out in shape: its empty outcome carries an
+            # empty dict where the other services carry None. Anything reading
+            # the saved JSON has to consult service_status, because payload
+            # nullness alone does not mean the same thing per service.
             return "no_data", {}
         return "ok", results
     except Exception as e:
@@ -153,6 +165,9 @@ def aggregate_results(ip_address, timeout=30):
     Aggregates the results from all reputation services, tracking the
     outcome of each service separately from its payload.
     """
+    # The three services run one after another, each with the full
+    # timeout. A run where every service hangs takes three times the
+    # timeout the operator set, not one times it.
     abuse_outcome, abuseipdb_results = check_abuseipdb(ip_address, timeout=timeout)
     vt_outcome, virustotal_results = check_virustotal(ip_address, timeout=timeout)
     ipvoid_outcome, ipvoid_results = scrape_ipvoid(ip_address, timeout=timeout)
@@ -234,6 +249,10 @@ def is_valid_ip(ip_address):
         if len(parts) != 4:
             return False
         for part in parts:
+            # int() is lenient in ways an address check should not be: it takes
+            # leading plus signs, surrounding whitespace, and several Unicode
+            # digit sets, and each part may carry leading zeros. Forms like
+            # those pass here and are then sent to the services as written.
             if not 0 <= int(part) <= 255:
                 return False
         return True
@@ -250,6 +269,9 @@ def setup_argparse():
     parser = argparse.ArgumentParser(description='IP Reputation Lookup Tool')
     parser.add_argument('ip_address', help='The IP address to check')
     parser.add_argument('-o', '--output', help='Output file to save results (JSON format)')
+    # The timeout value itself is never range checked. Zero or a
+    # negative number reaches requests, which rejects it in ways the
+    # per service RequestException handlers are not written around.
     parser.add_argument('--timeout', type=int, default=30, help='Timeout in seconds for each service request (default: 30)')
     return parser
 
