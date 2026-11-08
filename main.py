@@ -10,9 +10,9 @@ from bs4 import BeautifulSoup
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # API Keys (Store securely, consider environment variables)
-# Both keys are read once, at import. A process that sets the
-# environment after importing this module, as test harnesses do,
-# is checked against the empty values captured here.
+# The module level values are the import time default only. Each
+# check function re-reads its environment variable at call time, so
+# a key set after import is honored.
 ABUSEIPDB_API_KEY = os.environ.get("ABUSEIPDB_API_KEY")
 VIRUSTOTAL_API_KEY = os.environ.get("VIRUSTOTAL_API_KEY")
 
@@ -30,7 +30,8 @@ def check_abuseipdb(ip_address, timeout=30):
         tuple: (outcome, dict or None). A 404 is reported as "unknown",
         distinct from a failed lookup.
     """
-    if not ABUSEIPDB_API_KEY:
+    api_key = os.environ.get("ABUSEIPDB_API_KEY", ABUSEIPDB_API_KEY)
+    if not api_key:
         logging.error("AbuseIPDB API key not set. Please set the ABUSEIPDB_API_KEY environment variable.")
         return "not_configured", None
 
@@ -40,7 +41,7 @@ def check_abuseipdb(ip_address, timeout=30):
         'maxAgeInDays': 90  # Configuration to change the maximum report age
     }
     headers = {
-        'Key': ABUSEIPDB_API_KEY,
+        'Key': api_key,
         'Accept': 'application/json'
     }
 
@@ -79,13 +80,14 @@ def check_virustotal(ip_address, timeout=30):
         tuple: (outcome, dict or None). A 404 is reported as "unknown",
         distinct from a failed lookup.
     """
-    if not VIRUSTOTAL_API_KEY:
+    api_key = os.environ.get("VIRUSTOTAL_API_KEY", VIRUSTOTAL_API_KEY)
+    if not api_key:
         logging.error("VirusTotal API key not set. Please set the VIRUSTOTAL_API_KEY environment variable.")
         return "not_configured", None
 
     url = f'https://www.virustotal.com/api/v3/ip_addresses/{ip_address}'
     headers = {
-        'x-apikey': VIRUSTOTAL_API_KEY,
+        'x-apikey': api_key,
         'Accept': 'application/json'
     }
 
@@ -242,22 +244,25 @@ def print_results(results):
 
 def is_valid_ip(ip_address):
     """
-    Validates if the given string is a valid IPv4 address.
+    Validates if the given string is a valid IPv4 address in strict
+    dotted decimal form: four parts of ASCII digits only, no signs,
+    no surrounding whitespace, no leading zeros except a single 0,
+    and each part at most 255. Loose forms are rejected here instead
+    of being sent to the services as written.
     """
-    try:
-        parts = ip_address.split('.')
-        if len(parts) != 4:
-            return False
-        for part in parts:
-            # int() is lenient in ways an address check should not be: it takes
-            # leading plus signs, surrounding whitespace, and several Unicode
-            # digit sets, and each part may carry leading zeros. Forms like
-            # those pass here and are then sent to the services as written.
-            if not 0 <= int(part) <= 255:
-                return False
-        return True
-    except ValueError:
+    if not isinstance(ip_address, str):
         return False
+    parts = ip_address.split('.')
+    if len(parts) != 4:
+        return False
+    for part in parts:
+        if not part or not part.isascii() or not part.isdigit():
+            return False
+        if len(part) > 1 and part.startswith('0'):
+            return False
+        if int(part) > 255:
+            return False
+    return True
 
 
 def setup_argparse():
@@ -269,9 +274,6 @@ def setup_argparse():
     parser = argparse.ArgumentParser(description='IP Reputation Lookup Tool')
     parser.add_argument('ip_address', help='The IP address to check')
     parser.add_argument('-o', '--output', help='Output file to save results (JSON format)')
-    # The timeout value itself is never range checked. Zero or a
-    # negative number reaches requests, which rejects it in ways the
-    # per service RequestException handlers are not written around.
     parser.add_argument('--timeout', type=int, default=30, help='Timeout in seconds for each service request (default: 30)')
     return parser
 
@@ -282,6 +284,9 @@ def main():
     """
     parser = setup_argparse()
     args = parser.parse_args()
+
+    if args.timeout <= 0:
+        parser.error("--timeout must be a positive number of seconds.")
 
     ip_address = args.ip_address
 
@@ -311,6 +316,7 @@ def main():
         except Exception as e:
             logging.error(f"Error saving results to file: {e}")
             print(f"Error: Could not save results to file: {e}")
+            sys.exit(1)
 
 
 if __name__ == "__main__":
